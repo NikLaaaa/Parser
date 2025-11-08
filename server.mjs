@@ -1,14 +1,14 @@
 import 'dotenv/config';
 import express from 'express';
 import axios from 'axios';
-import cheerio from 'cheerio';
+import * as cheerio from 'cheerio';            // 👈 ВАЖНО: нет default-экспорта
 import { Telegraf, Markup } from 'telegraf';
 import PQueue from 'p-queue';
 
 // ========= ENV =========
 const PORT = process.env.PORT || 3000;
-const BOT_TOKEN = process.env.BOT_TOKEN; // из @BotFather (обязательно)
-const MAX_CONCURRENCY = Number(process.env.MAX_CONCURRENCY || 4); // параллельность запросов
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const MAX_CONCURRENCY = Number(process.env.MAX_CONCURRENCY || 4);
 const USER_AGENT =
   process.env.USER_AGENT ||
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36';
@@ -24,138 +24,95 @@ const http = axios.create({
   timeout: 20000
 });
 
-// Нормализация текста/чисел звёзд: "1 100 ⭐", "1100 звёзд", "⭐1100"
 function parseStars(text = '') {
   const clean = text.replace(/\s| |,/g, '');
   const m = clean.match(/(\d{1,9})/);
   return m ? Number(m[1]) : null;
 }
 
-// Проверяем страницу конкретного подарка: есть ли кнопка «купить за звёзды»
 async function checkGiftBuyable(url) {
   try {
     const { data } = await http.get(url);
     const $ = cheerio.load(data);
-
-    // SELECTOR: блок/кнопка покупки. Поддержим несколько вариантов текста.
     const btn = $('a,button')
       .filter((_, el) => {
         const t = $(el).text().toLowerCase();
         return (
           t.includes('купить за зв') ||
-          t.includes('buy for') && t.includes('star') ||
-          t.includes('купить') && t.includes('⭐')
+          (t.includes('buy for') && t.includes('star')) ||
+          (t.includes('купить') && t.includes('⭐'))
         );
       })
       .first();
-
     return btn.length > 0;
-  } catch (e) {
-    return false; // если не открылась, считаем не подходит
+  } catch {
+    return false;
   }
 }
 
-// Парсим выдачу peek.tg по «рынку/подаркам»
-// ВАЖНО: это эвристика. Возможные маршруты peek.tg меняются; ниже 2 стратегии:
-//  A) пробуем «маркет» (если есть), 
-//  B) общий поиск с фильтром по цене внутри карточки.
 async function scrapePeek({ maxStars, limit = 15, pageFrom = 1, pageTo = 5 }) {
   const results = [];
   const queue = new PQueue({ concurrency: MAX_CONCURRENCY });
 
-  // вспомогательная функция: разобрать одну страницу каталога
-  async function parseListPage(url) {
-    const { data } = await http.get(url);
-    const $ = cheerio.load(data);
-
-    // SELECTOR: карточки подарков в выдаче (обнови при необходимости)
-    const cards = $('[data-card="gift"], .gift-card, .market-card, .card'); // варианты
-    if (cards.length === 0) {
-      // fallback: искать по фрагментам
-      return $('[href*="/gift/"], a:contains("gift")').closest('div');
-    }
-    return cards;
-  }
-
-  // разбор карточки → {username, priceStars, giftUrl}
   function extractCard($, card) {
     const el = $(card);
-
-    // SELECTOR: ссылка на подарок
-    const giftUrl =
+    let giftUrl =
       el.find('a[href*="/gift/"]').attr('href') ||
       el.find('a:contains("gift")').attr('href') ||
       el.find('a').attr('href');
-
-    // нормализуем ссылку
     const fullUrl = giftUrl?.startsWith('http') ? giftUrl : giftUrl ? `https://peek.tg${giftUrl}` : null;
 
-    // SELECTOR: цена в звёздах
     const priceText =
       el.find('.price, .gift-price, .market-price, .price-stars').text() ||
       el.text();
     const priceStars = parseStars(priceText);
 
-    // SELECTOR: имя/юзернейм продавца
     const nameText =
       el.find('.username, .seller, .name, .title').text() ||
       el.find('a[href^="/u/"]').text() ||
       '';
-
-    // Юзернейм из ссылки вида /u/username
     const unameHref = el.find('a[href^="/u/"]').attr('href');
     const username = unameHref ? unameHref.split('/').pop() : nameText.trim();
 
     return { username, priceStars, giftUrl: fullUrl };
   }
 
-  // Стратегия A: «маркет подарков» (если у них есть страница вроде /market/gifts)
-  const marketUrls = [
-    `https://peek.tg/market/gifts?page=`,        // гипотетический
-    `https://peek.tg/gifts?page=`,               // гипотетический
-    `https://peek.tg/search?type=gifts&page=`    // общий поиск по типу
-  ];
-
-  // Стратегия B: общий поиск "gift" (на всякий случай)
-  const fallbackUrls = [
+  const listBases = [
+    // предположительные/резервные маршруты каталога
+    `https://peek.tg/market/gifts?page=`,
+    `https://peek.tg/gifts?page=`,
+    `https://peek.tg/search?type=gifts&page=`,
+    // fallback-поиск
     `https://peek.tg/search?q=gift&page=`,
     `https://peek.tg/search?q=%D0%BF%D0%BE%D0%B4%D0%B0%D1%80%D0%BE%D0%BA&page=`
   ];
 
-  async function trySet(urlBase) {
+  for (const base of listBases) {
     for (let page = pageFrom; page <= pageTo && results.length < limit; page++) {
-      const url = `${urlBase}${page}`;
-      let cards;
+      const url = `${base}${page}`;
+      let data;
       try {
-        cards = await parseListPage(url);
+        ({ data } = await http.get(url));
       } catch {
         continue;
       }
-      const $ = cheerio.load((await http.get(url)).data);
-      $(cards).each((_, c) => {
+      const $ = cheerio.load(data);
+
+      // Карточки (несколько вариантов селекторов)
+      let cards = $('[data-card="gift"], .gift-card, .market-card, .card');
+      if (cards.length === 0) {
+        cards = $('[href*="/gift/"], a:contains("gift")').closest('div');
+      }
+      cards.each((_, c) => {
         if (results.length >= limit) return;
         const item = extractCard($, c);
         if (!item.giftUrl || !item.priceStars) return;
-        if (item.priceStars <= maxStars) {
-          results.push(item);
-        }
+        if (item.priceStars <= maxStars) results.push(item);
       });
     }
-  }
-
-  // Пытаемся по стратегиям
-  for (const base of marketUrls) {
-    await trySet(base);
     if (results.length >= limit) break;
   }
-  if (results.length < limit) {
-    for (const base of fallbackUrls) {
-      await trySet(base);
-      if (results.length >= limit) break;
-    }
-  }
 
-  // Доп.фильтр — проверка страницы подарка на наличие «купить за звёзды»
   const checked = [];
   await queue.addAll(
     results.map((r) => async () => {
@@ -163,8 +120,6 @@ async function scrapePeek({ maxStars, limit = 15, pageFrom = 1, pageTo = 5 }) {
       if (ok) checked.push(r);
     })
   );
-
-  // максимум 15 (или limit)
   return checked.slice(0, limit);
 }
 
@@ -181,11 +136,8 @@ bot.start((ctx) =>
   )
 );
 
-bot.help((ctx) =>
-  ctx.reply('Напиши /search и затем введи число — максимальную цену в звёздах (например, 1100).')
-);
+bot.help((ctx) => ctx.reply('Напиши /search и затем введи число — максимальную цену в звёздах (например, 1100).'));
 
-// Состояние «жду число»
 const WAITING = new Set();
 
 bot.command('search', async (ctx) => {
@@ -210,18 +162,13 @@ bot.on('text', async (ctx) => {
     if (!items.length) {
       return ctx.reply('Пока ничего не нашёл под этот лимит. Попробуй увеличить или повторить позже.');
     }
-
-    // Отправим одним сообщением
     const lines = items.map((it, i) => {
       const u = it.username ? `@${it.username}` : '—';
       const price = it.priceStars ? `${it.priceStars}⭐` : '—';
       const link = it.giftUrl;
       return `${i + 1}. ${u}\n   Цена: ${price}\n   Подарок: ${link}`;
     });
-
-    await ctx.reply(lines.join('\n\n'), {
-      disable_web_page_preview: true
-    });
+    await ctx.reply(lines.join('\n\n'), { disable_web_page_preview: true });
   } catch (e) {
     console.error(e);
     await ctx.reply('Ошибка при поиске. Разработчик уже оповещён.');
@@ -233,7 +180,6 @@ const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// Мини-форма для ручной проверки
 app.get('/', (_req, res) => {
   res.type('html').send(`<!doctype html><meta charset="utf-8">
 <title>Gift Parser</title>
@@ -264,7 +210,6 @@ async function go(e){
 </script>`);
 });
 
-// JSON API
 app.get('/api/search', async (req, res) => {
   try {
     const maxStars = Number(req.query.maxStars || 1100);
