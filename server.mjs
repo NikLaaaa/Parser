@@ -3,8 +3,11 @@ import express from 'express';
 import { Telegraf, Markup } from 'telegraf';
 import PQueue from 'p-queue';
 
-// Puppeteer + Stealth
-import puppeteer from 'puppeteer';
+// === Chromium для безсерверных сред ===
+import chromium from '@sparticuz/chromium';
+import puppeteer from 'puppeteer-core';
+
+// Stealth, чтобы SPA не резала бота
 import puppeteerExtra from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 puppeteerExtra.use(StealthPlugin());
@@ -12,15 +15,14 @@ puppeteerExtra.use(StealthPlugin());
 /** ===== ENV ===== */
 const PORT = process.env.PORT || 3000;
 const BOT_TOKEN = process.env.BOT_TOKEN;
-if (!BOT_TOKEN) {
-  console.error('BOT_TOKEN is required in Environment'); process.exit(1);
-}
-const HEADLESS = process.env.HEADLESS !== 'false';        // true по умолчанию
+if (!BOT_TOKEN) { console.error('BOT_TOKEN is required'); process.exit(1); }
+
+const HEADLESS = process.env.HEADLESS !== 'false';         // true по умолчанию
 const PAGE_TIMEOUT = Number(process.env.PAGE_TIMEOUT || 60000);
 const MAX_CONCURRENCY = Number(process.env.MAX_CONCURRENCY || 2);
 const PEEK_URL = process.env.PEEK_URL || 'https://peek.tg/search';
 
-/** ===== UTILS ===== */
+/** ===== helpers ===== */
 function parseStars(text = '') {
   const clean = String(text).replace(/\s|,| /g, '');
   const m = clean.match(/(\d{1,9})/);
@@ -28,14 +30,27 @@ function parseStars(text = '') {
 }
 
 async function launchBrowser() {
-  // puppeteer-extra подменяет puppeteer за счёт plug-in, но стартуем движком puppeteer
-  return await puppeteerExtra.launch({
-    headless: HEADLESS ? 'new' : false,
+  // Настраиваем режимы chromium под Render
+  chromium.setHeadlessMode(HEADLESS);      // true
+  chromium.setGraphicsMode(false);         // без WebGL
+
+  const executablePath = await chromium.executablePath(); // <-- готовый путь к бинарнику
+  const browser = await puppeteerExtra.launch({
+    executablePath,
+    headless: chromium.headless,
     args: [
-      '--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage',
-      '--disable-gpu','--no-zygote','--window-size=1366,768'
-    ]
+      ...chromium.args,
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--no-zygote',
+      '--single-process'
+    ],
+    defaultViewport: chromium.defaultViewport,
+    ignoreHTTPSErrors: true
   });
+  return browser;
 }
 
 async function withBrowser(fn) {
@@ -48,10 +63,8 @@ async function withBrowser(fn) {
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121 Safari/537.36'
     );
-    await page.setExtraHTTPHeaders({
-      'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
-    });
-    // отключим картинки/шрифты для скорости
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7' });
+    // вырежем тяжёлые ресурсы, чтобы быстрее
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const r = req.resourceType();
@@ -72,7 +85,6 @@ async function autoScroll(page, maxSteps = 18) {
 }
 
 async function ensureGiftsTab(page) {
-  // если у них есть вкладки, пытаемся нажать «Подарки»/«Gifts»
   const clicked = await page.evaluate(() => {
     const tabs = Array.from(document.querySelectorAll('a,button,div[role="tab"]'));
     const t = (el) => (el.textContent || '').trim().toLowerCase();
@@ -83,12 +95,9 @@ async function ensureGiftsTab(page) {
     if (el) { el.click(); return true; }
     return false;
   });
-  if (clicked) {
-    await page.waitForTimeout(1200);
-  }
+  if (clicked) await page.waitForTimeout(1200);
 }
 
-/** Проверяем детальную страницу: есть ли «купить за звёзды» */
 async function checkGiftBuyable(page, url) {
   try {
     await page.goto(url, { waitUntil: 'networkidle2' });
@@ -110,66 +119,52 @@ async function checkGiftBuyable(page, url) {
   }
 }
 
-/** Основной скрейпер peek.tg */
+/** ===== Основной скрейпер peek.tg ===== */
 async function scrapePeek({ maxStars, limit = 15 }) {
   return await withBrowser(async (page) => {
-    // 1) загрузка SPA и ожидание реальных данных
     await page.goto(PEEK_URL, { waitUntil: 'networkidle2' });
     await page.waitForTimeout(2500);
     await ensureGiftsTab(page);
     await autoScroll(page, 18);
 
-    // 2) собрать карточки из DOM
     const rawItems = await page.evaluate(() => {
       const cards = Array.from(document.querySelectorAll(
         '[data-card="gift"], .gift-card, .market-card, .card, [class*="card"]'
       ));
-
       function firstAttr(el, sel, attr = 'href') {
         const a = el.querySelector(sel);
         return a ? a.getAttribute(attr) : null;
       }
-
       return cards.map(el => {
         const priceBlock =
           el.querySelector('.price, .gift-price, .market-price, .price-stars') || el;
         const priceText = (priceBlock.textContent || '').trim();
         const unameHref = firstAttr(el, 'a[href^="/u/"]');
         const username = unameHref ? unameHref.split('/').pop() : '';
-
         let giftHref =
           firstAttr(el, 'a[href*="/gift/"]') ||
           firstAttr(el, 'a[href*="gift"]') ||
           firstAttr(el, 'a');
-
         if (!giftHref) return null;
-
         if (!giftHref.startsWith('http')) {
           if (giftHref.startsWith('/')) giftHref = `https://peek.tg${giftHref}`;
           else giftHref = `https://peek.tg/${giftHref}`;
         }
-
         return { username: username || '', priceText, link: giftHref };
       }).filter(Boolean);
     });
 
-    // 3) фильтр по звёздам
     const filtered = rawItems
       .map(it => ({ ...it, priceStars: parseStars(it.priceText) }))
       .filter(it => it.priceStars && it.priceStars <= maxStars);
 
-    // 4) проверка «купить за звёзды»
     const out = [];
     const queue = new PQueue({ concurrency: MAX_CONCURRENCY });
     await queue.addAll(
       filtered.map((it) => async () => {
         if (out.length >= limit) return;
         const ok = await checkGiftBuyable(page, it.link);
-        if (ok) out.push({
-          username: it.username || '—',
-          priceStars: it.priceStars || null,
-          giftUrl: it.link
-        });
+        if (ok) out.push({ username: it.username || '—', priceStars: it.priceStars || null, giftUrl: it.link });
       })
     );
 
@@ -208,7 +203,6 @@ bot.on('text', async (ctx) => {
   try {
     const items = await scrapePeek({ maxStars, limit });
     if (!items.length) return ctx.reply('Пока ничего не нашёл под этот лимит. Попробуй увеличить или повторить позже.');
-
     const lines = items.map((it, i) => {
       const u = it.username ? `@${it.username}` : '—';
       const price = it.priceStars ? `${it.priceStars}⭐` : '—';
@@ -267,7 +261,7 @@ app.get('/api/search', async (req, res) => {
   }
 });
 
-// DEBUG: HTML снапшот и скрин — поможет понять, что реально видит Render
+// DEBUG: что реально видит браузер на Render
 app.get('/debug/html', async (_req, res) => {
   try {
     const html = await withBrowser(async (page) => {
