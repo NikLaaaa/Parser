@@ -1,142 +1,164 @@
 import 'dotenv/config';
 import express from 'express';
-import axios from 'axios';
-import * as cheerio from 'cheerio';            // 👈 ВАЖНО: нет default-экспорта
 import { Telegraf, Markup } from 'telegraf';
 import PQueue from 'p-queue';
+import { chromium } from 'playwright';
 
-// ========= ENV =========
+/** ===== ENV ===== */
 const PORT = process.env.PORT || 3000;
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const MAX_CONCURRENCY = Number(process.env.MAX_CONCURRENCY || 4);
-const USER_AGENT =
-  process.env.USER_AGENT ||
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36';
-
+const BOT_TOKEN = process.env.BOT_TOKEN; // токен бота из @BotFather
 if (!BOT_TOKEN) {
-  console.error('BOT_TOKEN is required in environment');
+  console.error('BOT_TOKEN is required in Environment');
   process.exit(1);
 }
 
-// ========= helpers =========
-const http = axios.create({
-  headers: { 'User-Agent': USER_AGENT, Accept: 'text/html,application/xhtml+xml' },
-  timeout: 20000
-});
+const HEADLESS = process.env.HEADLESS !== 'false'; // true по умолчанию
+const PAGE_TIMEOUT = Number(process.env.PAGE_TIMEOUT || 45000);
+const MAX_CONCURRENCY = Number(process.env.MAX_CONCURRENCY || 2);
 
+/** ===== UTILS ===== */
 function parseStars(text = '') {
-  const clean = text.replace(/\s| |,/g, '');
+  const clean = String(text).replace(/\s|,| /g, '');
   const m = clean.match(/(\d{1,9})/);
   return m ? Number(m[1]) : null;
 }
 
-async function checkGiftBuyable(url) {
+async function withBrowser(fn) {
+  const browser = await chromium.launch({
+    headless: HEADLESS,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+  });
   try {
-    const { data } = await http.get(url);
-    const $ = cheerio.load(data);
-    const btn = $('a,button')
-      .filter((_, el) => {
-        const t = $(el).text().toLowerCase();
+    const ctx = await browser.newContext();
+    const page = await ctx.newPage();
+    page.setDefaultTimeout(PAGE_TIMEOUT);
+    return await fn(page);
+  } finally {
+    await browser.close();
+  }
+}
+
+async function autoScroll(page, maxSteps = 12) {
+  for (let i = 0; i < maxSteps; i++) {
+    await page.evaluate(() => window.scrollBy(0, window.innerHeight));
+    await page.waitForTimeout(800);
+  }
+}
+
+/** Проверяем страницу подарка: есть ли «купить за звёзды» */
+async function checkGiftBuyablePW(page, url) {
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT });
+    await page.waitForTimeout(1500);
+    const hasBuy = await page.evaluate(() => {
+      const els = Array.from(document.querySelectorAll('a,button'));
+      return els.some(el => {
+        const t = (el.textContent || '').toLowerCase();
         return (
           t.includes('купить за зв') ||
           (t.includes('buy for') && t.includes('star')) ||
           (t.includes('купить') && t.includes('⭐'))
         );
-      })
-      .first();
-    return btn.length > 0;
+      });
+    });
+    return hasBuy;
   } catch {
     return false;
   }
 }
 
-async function scrapePeek({ maxStars, limit = 15, pageFrom = 1, pageTo = 5 }) {
-  const results = [];
-  const queue = new PQueue({ concurrency: MAX_CONCURRENCY });
+/** Основной скрейпер peek.tg: собираем карточки и фильтруем по звёздам */
+async function scrapePeek({ maxStars, limit = 15 }) {
+  return await withBrowser(async (page) => {
+    // 1) общий поиск/лента (если у peek.tg изменится маршрут — поправь URL)
+    const url = 'https://peek.tg/search';
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT });
+    await page.waitForTimeout(2500);
+    await autoScroll(page, 10);
 
-  function extractCard($, card) {
-    const el = $(card);
-    let giftUrl =
-      el.find('a[href*="/gift/"]').attr('href') ||
-      el.find('a:contains("gift")').attr('href') ||
-      el.find('a').attr('href');
-    const fullUrl = giftUrl?.startsWith('http') ? giftUrl : giftUrl ? `https://peek.tg${giftUrl}` : null;
+    // 2) собрать сырые карточки из DOM
+    const rawItems = await page.evaluate(() => {
+      const cards = Array.from(
+        document.querySelectorAll(
+          '[data-card="gift"], .gift-card, .market-card, .card, [class*="card"]'
+        )
+      );
 
-    const priceText =
-      el.find('.price, .gift-price, .market-price, .price-stars').text() ||
-      el.text();
-    const priceStars = parseStars(priceText);
-
-    const nameText =
-      el.find('.username, .seller, .name, .title').text() ||
-      el.find('a[href^="/u/"]').text() ||
-      '';
-    const unameHref = el.find('a[href^="/u/"]').attr('href');
-    const username = unameHref ? unameHref.split('/').pop() : nameText.trim();
-
-    return { username, priceStars, giftUrl: fullUrl };
-  }
-
-  const listBases = [
-    // предположительные/резервные маршруты каталога
-    `https://peek.tg/market/gifts?page=`,
-    `https://peek.tg/gifts?page=`,
-    `https://peek.tg/search?type=gifts&page=`,
-    // fallback-поиск
-    `https://peek.tg/search?q=gift&page=`,
-    `https://peek.tg/search?q=%D0%BF%D0%BE%D0%B4%D0%B0%D1%80%D0%BE%D0%BA&page=`
-  ];
-
-  for (const base of listBases) {
-    for (let page = pageFrom; page <= pageTo && results.length < limit; page++) {
-      const url = `${base}${page}`;
-      let data;
-      try {
-        ({ data } = await http.get(url));
-      } catch {
-        continue;
+      function firstAttr(el, sel, attr = 'href') {
+        const a = el.querySelector(sel);
+        return a ? a.getAttribute(attr) : null;
       }
-      const $ = cheerio.load(data);
 
-      // Карточки (несколько вариантов селекторов)
-      let cards = $('[data-card="gift"], .gift-card, .market-card, .card');
-      if (cards.length === 0) {
-        cards = $('[href*="/gift/"], a:contains("gift")').closest('div');
-      }
-      cards.each((_, c) => {
-        if (results.length >= limit) return;
-        const item = extractCard($, c);
-        if (!item.giftUrl || !item.priceStars) return;
-        if (item.priceStars <= maxStars) results.push(item);
-      });
-    }
-    if (results.length >= limit) break;
-  }
+      return cards.map(el => {
+        const text = el.textContent || '';
+        const priceBlock =
+          el.querySelector('.price, .gift-price, .market-price, .price-stars') || el;
+        const priceText = priceBlock.textContent || '';
 
-  const checked = [];
-  await queue.addAll(
-    results.map((r) => async () => {
-      const ok = await checkGiftBuyable(r.giftUrl);
-      if (ok) checked.push(r);
-    })
-  );
-  return checked.slice(0, limit);
+        const unameHref = firstAttr(el, 'a[href^="/u/"]');
+        const username = unameHref ? unameHref.split('/').pop() : '';
+
+        let giftHref =
+          firstAttr(el, 'a[href*="/gift/"]') ||
+          firstAttr(el, 'a[href*="gift"]') ||
+          firstAttr(el, 'a');
+
+        if (!giftHref) return null;
+
+        if (!giftHref.startsWith('http')) {
+          if (giftHref.startsWith('/')) giftHref = `https://peek.tg${giftHref}`;
+          else giftHref = `https://peek.tg/${giftHref}`;
+        }
+
+        return {
+          username: username || '',
+          priceText,
+          link: giftHref,
+          text
+        };
+      }).filter(Boolean);
+    });
+
+    // 3) фильтр по цене в звёздах
+    const filtered = rawItems
+      .map(it => ({ ...it, priceStars: parseStars(it.priceText) }))
+      .filter(it => it.priceStars && it.priceStars <= maxStars);
+
+    // 4) доп-проверка «есть кнопка купить за звёзды»
+    const out = [];
+    const queue = new PQueue({ concurrency: MAX_CONCURRENCY });
+    await queue.addAll(
+      filtered.map((it) => async () => {
+        if (out.length >= limit) return;
+        const ok = await checkGiftBuyablePW(page, it.link);
+        if (ok) {
+          out.push({
+            username: it.username || '—',
+            priceStars: it.priceStars || null,
+            giftUrl: it.link
+          });
+        }
+      })
+    );
+
+    return out.slice(0, limit);
+  });
 }
 
-// ========= Telegram Bot =========
+/** ===== Telegram Bot ===== */
 const bot = new Telegraf(BOT_TOKEN);
 
 bot.start((ctx) =>
   ctx.reply(
     'Привет! Я найду подарки в продаже «за звёзды».\n\n' +
-      'Команды:\n' +
-      '• /search — поиск по лимиту (например, 1100)\n' +
-      '• /help — помощь',
+    'Команды:\n' +
+    '• /search — поиск по лимиту (например, 1100)\n' +
+    '• /help — помощь',
     Markup.keyboard([['/search']]).resize()
   )
 );
 
-bot.help((ctx) => ctx.reply('Напиши /search и затем введи число — максимальную цену в звёздах (например, 1100).'));
+bot.help((ctx) => ctx.reply('Напиши /search и затем введи число — максимум звёзд (например, 1100).'));
 
 const WAITING = new Set();
 
@@ -156,26 +178,25 @@ bot.on('text', async (ctx) => {
 
   const maxStars = n;
   const limit = 15;
-  await ctx.reply(`Ищу подарки «за звёзды» до ${maxStars}… Это может занять 5–20 секунд.`);
+  await ctx.reply(`Ищу подарки «за звёзды» до ${maxStars}… Это может занять 5–30 секунд.`);
   try {
-    const items = await scrapePeek({ maxStars, limit, pageFrom: 1, pageTo: 5 });
+    const items = await scrapePeek({ maxStars, limit });
     if (!items.length) {
       return ctx.reply('Пока ничего не нашёл под этот лимит. Попробуй увеличить или повторить позже.');
     }
     const lines = items.map((it, i) => {
       const u = it.username ? `@${it.username}` : '—';
       const price = it.priceStars ? `${it.priceStars}⭐` : '—';
-      const link = it.giftUrl;
-      return `${i + 1}. ${u}\n   Цена: ${price}\n   Подарок: ${link}`;
+      return `${i + 1}. ${u}\n   Цена: ${price}\n   Подарок: ${it.giftUrl}`;
     });
     await ctx.reply(lines.join('\n\n'), { disable_web_page_preview: true });
   } catch (e) {
     console.error(e);
-    await ctx.reply('Ошибка при поиске. Разработчик уже оповещён.');
+    await ctx.reply('Ошибка при поиске. Попробуй ещё раз позже.');
   }
 });
 
-// ========= HTTP API / UI =========
+/** ===== HTTP API / UI ===== */
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
@@ -221,7 +242,7 @@ app.get('/api/search', async (req, res) => {
   }
 });
 
-// ========= launch =========
+/** ===== Launch ===== */
 app.listen(PORT, () => console.log('HTTP listening on :' + PORT));
 bot.launch().then(() => console.log('Telegram bot started'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
