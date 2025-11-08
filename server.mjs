@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import { Telegraf, Markup } from 'telegraf';
 import PQueue from 'p-queue';
-import { chromium } from 'playwright';
+import puppeteer from 'puppeteer';
 
 /** ===== ENV ===== */
 const PORT = process.env.PORT || 3000;
@@ -11,7 +11,6 @@ if (!BOT_TOKEN) {
   console.error('BOT_TOKEN is required in Environment');
   process.exit(1);
 }
-
 const HEADLESS = process.env.HEADLESS !== 'false'; // true по умолчанию
 const PAGE_TIMEOUT = Number(process.env.PAGE_TIMEOUT || 45000);
 const MAX_CONCURRENCY = Number(process.env.MAX_CONCURRENCY || 2);
@@ -24,14 +23,23 @@ function parseStars(text = '') {
 }
 
 async function withBrowser(fn) {
-  const browser = await chromium.launch({
-    headless: HEADLESS,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+  const browser = await puppeteer.launch({
+    headless: HEADLESS ? 'new' : false,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--no-zygote'
+    ]
   });
   try {
-    const ctx = await browser.newContext();
-    const page = await ctx.newPage();
-    page.setDefaultTimeout(PAGE_TIMEOUT);
+    const page = await browser.newPage();
+    await page.setDefaultNavigationTimeout(PAGE_TIMEOUT);
+    await page.setDefaultTimeout(PAGE_TIMEOUT);
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121 Safari/537.36'
+    );
     return await fn(page);
   } finally {
     await browser.close();
@@ -46,9 +54,9 @@ async function autoScroll(page, maxSteps = 12) {
 }
 
 /** Проверяем страницу подарка: есть ли «купить за звёзды» */
-async function checkGiftBuyablePW(page, url) {
+async function checkGiftBuyable(page, url) {
   try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT });
+    await page.goto(url, { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(1500);
     const hasBuy = await page.evaluate(() => {
       const els = Array.from(document.querySelectorAll('a,button'));
@@ -72,7 +80,7 @@ async function scrapePeek({ maxStars, limit = 15 }) {
   return await withBrowser(async (page) => {
     // 1) общий поиск/лента (если у peek.tg изменится маршрут — поправь URL)
     const url = 'https://peek.tg/search';
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT });
+    await page.goto(url, { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(2500);
     await autoScroll(page, 10);
 
@@ -130,7 +138,7 @@ async function scrapePeek({ maxStars, limit = 15 }) {
     await queue.addAll(
       filtered.map((it) => async () => {
         if (out.length >= limit) return;
-        const ok = await checkGiftBuyablePW(page, it.link);
+        const ok = await checkGiftBuyable(page, it.link);
         if (ok) {
           out.push({
             username: it.username || '—',
@@ -178,7 +186,7 @@ bot.on('text', async (ctx) => {
 
   const maxStars = n;
   const limit = 15;
-  await ctx.reply(`Ищу подарки «за звёзды» до ${maxStars}… Это может занять 5–30 секунд.`);
+  await ctx.reply(`Ищу подарки «за звёзды» до ${maxStars}… Это может занять 5–40 секунд.`);
   try {
     const items = await scrapePeek({ maxStars, limit });
     if (!items.length) {
