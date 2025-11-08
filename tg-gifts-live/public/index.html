@@ -3,78 +3,90 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>NFT Подарки — фильтр по ⭐</title>
+  <title>NFT Gifts — проверка «Купить за ⭐»</title>
   <style>
     :root{--bg:#0f1115;--card:#171a21;--muted:#98a2b3;--text:#e6e7ea;--accent:#4f8cff;--border:#222631}
     *{box-sizing:border-box} body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial,sans-serif;background:#0b0e13;color:var(--text)}
-    .wrap{max-width:960px;margin:0 auto;padding:18px}
-    h1{font-size:18px;margin:0 0 8px} .sub{color:#98a2b3;font-size:13px;margin-bottom:10px}
+    .wrap{max-width:980px;margin:0 auto;padding:18px}
+    h1{font-size:18px;margin:0 0 10px} .sub{color:#98a2b3;font-size:13px;margin-bottom:10px}
     .panel{background:#171a21;border:1px solid #222631;border-radius:14px;overflow:hidden}
-    .controls{padding:16px;display:grid;grid-template-columns:1fr auto;gap:10px;align-items:end;border-bottom:1px solid #222631}
+    .controls{padding:16px;display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end;border-bottom:1px solid #222631}
     label{font-size:13px;color:#98a2b3;display:block;margin-bottom:6px}
-    input[type="number"]{width:100%;background:#0e121a;border:1px solid #222631;color:#e6e7ea;padding:12px;border-radius:12px}
+    input,textarea{width:100%;background:#0e121a;border:1px solid #222631;color:#e6e7ea;padding:12px;border-radius:12px}
+    textarea{min-height:64px;resize:vertical}
     button{background:#4f8cff;color:#fff;border:0;border-radius:12px;padding:12px 16px;font-weight:700;cursor:pointer}
-    .results{padding:10px;display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px}
+    .results{padding:10px;display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px}
     .card{background:#0f131c;border:1px solid #222631;border-radius:12px;padding:12px}
     .name{font-weight:700;margin-bottom:6px}
     .row{display:flex;justify-content:space-between;align-items:center;gap:10px}
-    .price{font-weight:800} .muted{color:#98a2b3;font-size:13px}
+    .muted{color:#98a2b3;font-size:13px}
+    .price{font-weight:800}
     .empty,.loading{color:#98a2b3;padding:18px;text-align:center}
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>Поиск подарков за ⭐</h1>
-    <div class="sub">Выдаёт максимум 15 лотов «на продаже», цена ≤ лимита</div>
+    <h1>Подарки «на продаже» (кнопка «Купить за ⭐»)</h1>
+    <div class="sub">Укажи до 15 юзернеймов и лимит ⭐. Мы проверим только лоты с кнопкой покупки.</div>
+
     <div class="panel">
       <div class="controls">
         <div>
-          <label for="max">Показать «до» (⭐)</label>
-          <input id="max" type="number" inputmode="numeric" placeholder="1100" />
+          <label for="sellers">Юзернеймы (через запятую)</label>
+          <textarea id="sellers" placeholder="@user1, @user2, @user3"></textarea>
         </div>
-        <div><button id="go">Искать</button></div>
+        <div>
+          <label for="max">Лимит «до» (⭐)</label>
+          <input id="max" type="number" inputmode="numeric" placeholder="например 1100">
+        </div>
+        <div>
+          <button id="go">Искать</button>
+        </div>
       </div>
+
       <div id="status" class="loading" hidden>Загрузка…</div>
       <div id="empty" class="empty" hidden>Ничего не найдено</div>
       <div id="results" class="results"></div>
     </div>
-    <p class="muted">Каждая карточка: имя, цена (⭐), ссылка на @PriceNFTbot.</p>
+
+    <p class="muted">Каждый результат: название подарка, цена (⭐), продавец, ссылка на бота-источник.</p>
   </div>
 
   <script>
     const $ = s => document.querySelector(s);
     const results = $("#results"), status = $("#status"), empty = $("#empty");
     $("#go").addEventListener("click", run);
-    $("#max").addEventListener("keydown", e => { if (e.key === 'Enter') run(); });
 
     async function run(){
-      status.hidden = false; empty.hidden = true; results.innerHTML = "";
+      status.hidden=false; empty.hidden=true; results.innerHTML="";
+      const sellers = $("#sellers").value.trim();
       const ms = $("#max").value.trim();
-      const q = new URLSearchParams(); if (ms) q.set("maxStars", ms);
-      const r = await fetch("/api/gifts?" + q.toString());
-      const data = await r.json();
-      status.hidden = true;
+      const p = new URLSearchParams();
+      if (sellers) p.set("sellers", sellers);
+      if (ms) p.set("maxStars", ms);
 
-      if (!Array.isArray(data) || data.length === 0) { empty.hidden = false; return; }
+      const r = await fetch("/api/gifts?" + p.toString());
+      const data = await r.json();
+      status.hidden=true;
+
+      if (!Array.isArray(data) || data.length===0) { empty.hidden=true; return; }
 
       const frag = document.createDocumentFragment();
-      data.forEach(item => {
-        const card = document.createElement("div"); card.className = "card";
-        const name = document.createElement("div"); name.className = "name"; name.textContent = item.name || "Без названия";
-        const row = document.createElement("div"); row.className = "row";
-        const price = document.createElement("div"); price.className = "price"; price.textContent = fmt(item.priceStars) + " ⭐";
-        const link = document.createElement("a"); link.href = item.url || "https://t.me/PriceNFTbot"; link.target = "_blank"; link.rel = "noopener"; link.textContent = "Открыть";
+      data.forEach(item=>{
+        const card = document.createElement("div"); card.className="card";
+        const name = document.createElement("div"); name.className="name"; name.textContent = item.name || "Без названия";
+        const seller = document.createElement("div"); seller.className="muted"; seller.textContent = "Продавец: " + (item.seller || "-");
+        const row = document.createElement("div"); row.className="row";
+        const price = document.createElement("div"); price.className="price"; price.textContent = fmt(item.priceStars) + " ⭐";
+        const link = document.createElement("a"); link.href = item.url || "#"; link.target="_blank"; link.rel="noopener"; link.textContent = "Открыть";
         row.appendChild(price); row.appendChild(link);
-        card.appendChild(name); card.appendChild(row);
+        card.appendChild(name); card.appendChild(seller); card.appendChild(row);
         frag.appendChild(card);
       });
       results.appendChild(frag);
     }
 
-    function fmt(n){ try { return new Intl.NumberFormat("ru-RU").format(n); } catch { return String(n); } }
-
-    // автозапуск
-    $("#max").value = 1100; run();
+    const fmt = n => { try { return new Intl.NumberFormat('ru-RU').format(n); } catch { return String(n); } };
   </script>
 </body>
 </html>
