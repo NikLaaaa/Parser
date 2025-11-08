@@ -3,40 +3,40 @@ import express from 'express';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import cors from 'cors';
-import { fetchGiftsFromPriceBot } from './priceBotProvider.js';
+import { scanUsers } from './providers/tgSearchPerUser.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(helmet({ contentSecurityPolicy: false })); // упростили CSP для WebApp
+app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
 app.use(morgan('tiny'));
 app.use(express.json());
 
-// API: /api/gifts?maxStars=1100
+// GET /api/gifts?sellers=@user1,@user2&maxStars=1100
 app.get('/api/gifts', async (req, res) => {
   try {
+    const sellersParam = (req.query.sellers || '').trim();
+    if (!sellersParam) return res.json([]); // нет списка — пустой ответ
+
+    const sellers = sellersParam.split(',').map(s => s.trim()).filter(Boolean).slice(0, 15);
     const maxStars = req.query.maxStars ? Number(req.query.maxStars) : null;
-    let gifts = await fetchGiftsFromPriceBot(); // только те, у кого есть реальная цена "Купить за ⭐"
 
-    if (Number.isFinite(maxStars)) {
-      gifts = gifts.filter(g => g.priceStars <= maxStars);
-    }
+    const items = await scanUsers({ sellers, maxItems: 15, maxStars });
 
-    gifts.sort((a, b) => a.priceStars - b.priceStars);
-    gifts = gifts.slice(0, 15); // максимум 15
-
-    res.json(gifts);
+    // нормализуем ответ
+    res.json(items.map(x => ({
+      name: x.giftName,
+      priceStars: x.priceStars,
+      seller: x.seller,
+      url: x.url
+    })));
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'fetch_failed', details: String(e?.message || e) });
   }
 });
 
-// фронт
 app.use(express.static('public'));
-
-// healthcheck
 app.get('/healthz', (_req, res) => res.send('ok'));
-
 app.listen(PORT, () => console.log('listening on :' + PORT));
